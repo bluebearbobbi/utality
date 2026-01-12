@@ -1,0 +1,11 @@
+list_commands() {
+  echo "Available API commands:"
+  jq -r '
+    # iterate top-level items (folders)
+    .item[] | 
+    # print folder name
+    "\(.name) (folder)" ,
+    # iterate items inside folder, only requests
+    (.item[]? | select(.request?) | "  - \(.name)")
+  ' "$COLLECTION_FILE"
+}
