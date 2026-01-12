@@ -1,24 +1,56 @@
-REQ_JSON=$(jq -c --arg name "$NAME" '
-  # Look at all items that have a .request field
-  .item[]? | select(.request? and .name == $name)
-' "$COLLECTION_FILE")
+run_command() {
+  local NAME="$1"
+  local RAW="${2:-false}"
 
+  # Get a fresh bearer token
+  TOKEN=$(get_bearer_token)
+  if [[ -z "$TOKEN" ]]; then
+    echo "ERROR: Could not get bearer token"
+    exit 1
+  fi
 
-  
-  
-METHOD=$(echo "$REQ_JSON" | jq -r '.request.method')
+  # Select the request object safely (avoid recursion)
+  REQ_JSON=$(jq -c --arg name "$NAME" '
+    .item[]? | select(.request? and .name == $name)
+  ' "$COLLECTION_FILE")
 
-URL=$(echo "$REQ_JSON" | jq -r --arg base "$BASE_URL" '
-  if .request.url.raw then
-    (.request.url.raw | sub("\\{\\{baseUrl\\}\\}"; $base))
-  elif .request.url.path then
-    $base + .request.url.path
+  if [[ -z "$REQ_JSON" || "$REQ_JSON" == "null" ]]; then
+    echo "ERROR: Request not found: $NAME"
+    exit 1
+  fi
+
+  # Extract HTTP method
+  METHOD=$(echo "$REQ_JSON" | jq -r '.request.method')
+
+  # Build URL safely
+  URL=$(echo "$REQ_JSON" | jq -r --arg base "$BASE_URL" '
+    if .request.url.raw then
+      (.request.url.raw | sub("\\{\\{baseUrl\\}\\}"; $base))
+    elif .request.url.path then
+      $base + .request.url.path
+    else
+      empty
+    end
+  ')
+
+  # Debug output BEFORE curl
+  echo "DEBUG: NAME=$NAME"
+  echo "DEBUG: METHOD=$METHOD"
+  echo "DEBUG: URL=$URL"
+
+  if [[ -z "$METHOD" || -z "$URL" ]]; then
+    echo "ERROR: Could not build URL or method for request: $NAME"
+    exit 1
+  fi
+
+  # Run curl
+  if [[ "$RAW" == "true" ]]; then
+    curl -v -X "$METHOD" "$URL" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Accept: application/json"
   else
-    empty
-  end
-')
-
-# DEBUG before curl
-echo "DEBUG: NAME=$NAME"
-echo "DEBUG: METHOD=$METHOD"
-echo "DEBUG: URL=$URL"
+    curl -s -X "$METHOD" "$URL" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Accept: application/json" | jq
+  fi
+}
