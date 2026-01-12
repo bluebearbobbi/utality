@@ -3,34 +3,43 @@ run_command() {
   local QUERY="${2:-}"
   local RAW="${3:-false}"
 
+  # get a valid bearer token
   TOKEN=$(get_bearer_token)
 
-  METHOD=$(jq -r --arg name "$NAME" '
-    .. | objects
-    | select(.name? == $name and .request?)
-    | .request.method
+  # find the request object recursively
+  local REQ_JSON
+  REQ_JSON=$(jq -c --arg name "$NAME" '
+    .. | objects | select(.name? == $name and .request?)
   ' "$COLLECTION_FILE")
 
-  PATH=$(jq -r --arg name "$NAME" '
-    .. | objects
-    | select(.name? == $name and .request?)
-    | if .request.url.raw then
-        .request.url.raw
-      else
-        "/" + (.request.url.path | join("/"))
-      end
-  ' "$COLLECTION_FILE")
-
-  if [[ -z "$METHOD" || -z "$PATH" || "$METHOD" == "null" || "$PATH" == "null" ]]; then
-    echo "ERROR: Command not runnable (folder or invalid name): $NAME"
+  if [[ -z "$REQ_JSON" ]]; then
+    echo "ERROR: Request not found or is a folder: $NAME"
     exit 1
   fi
 
-  URL="$BASE_URL$PATH$QUERY"
+  # method
+  METHOD=$(echo "$REQ_JSON" | jq -r '.request.method')
 
-  # TEMP debug (remove later)
+  # url: prefer raw, substitute {{baseUrl}}, else build from path
+  URL=$(echo "$REQ_JSON" | jq -r --arg base "$BASE_URL" '
+    if .request.url.raw then
+      (.request.url.raw | sub("\\{\\{baseUrl\\}\\}"; $base))
+    elif .request.url.path then
+      $base + "/" + (.request.url.path | join("/"))
+    else
+      empty
+    end
+  ')
+
+  if [[ -z "$METHOD" || -z "$URL" ]]; then
+    echo "ERROR: Could not build URL or method for $NAME"
+    exit 1
+  fi
+
+  # debug output (remove if you want)
   echo "DEBUG: $METHOD $URL" >&2
 
+  # run curl
   if [[ "$RAW" == "true" ]]; then
     curl -s -X "$METHOD" "$URL" \
       -H "Authorization: Bearer $TOKEN" \
