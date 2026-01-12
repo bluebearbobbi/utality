@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="bd-config.json"
+COLLECTION_FILE="postman/blackduck-sca.json"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Missing $CONFIG_FILE"
+  exit 1
+fi
+
+if [[ ! -f "$COLLECTION_FILE" ]]; then
+  echo "Missing Postman collection: $COLLECTION_FILE"
+  exit 1
+fi
+
+BASE_URL=$(jq -r '.base_url' "$CONFIG_FILE")
+API_TOKEN=$(jq -r '.api_token' "$CONFIG_FILE")
+TOKEN_CACHE=$(jq -r '.token_cache_file' "$CONFIG_FILE")
+
+#######################################
+# Bearer Token Handling
+#######################################
+get_bearer_token() {
+  if [[ -f "$TOKEN_CACHE" ]]; then
+    EXP=$(jq -r '.expires_at' "$TOKEN_CACHE")
+    NOW=$(date +%s)
+    if (( NOW < EXP )); then
+      jq -r '.token' "$TOKEN_CACHE"
+      return
+    fi
+  fi
+
+  RESPONSE=$(curl -s -X POST \
+    "$BASE_URL/api/tokens/authenticate" \
+    -H "Authorization: token $API_TOKEN")
+
+  TOKEN=$(echo "$RESPONSE" | jq -r '.bearerToken')
+  TTL_MS=$(echo "$RESPONSE" | jq -r '.expiresInMilliseconds')
+
+  if [[ "$TOKEN" == "null" ]]; then
+    echo "Failed to authenticate:"
+    echo "$RESPONSE" | jq
+    exit 1
+  fi
+
+  EXPIRES_AT=$(( $(date +%s) + TTL_MS / 1000 - 30 ))
+
+  jq -n \
+    --arg token "$TOKEN" \
+    --argjson exp "$EXPIRES_AT" \
+    '{token: $token, expires_at: $exp}' > "$TOKEN_CACHE"
+
+  echo "$TOKEN"
+}
+
+#######################################
+# Helpers
+#######################################
+list_commands() {
+  jq -r '.item[].name' "$COLLECTION_FILE"
+}
+
+describe_command() {
+  local NAME="$1"
+  jq \
+    --arg name "$NAME" \
+    '.item[] | select(.name == $name)' \
+    "$COLLECTION_FILE"
+}
+
+get_request_field() {
+  local NAME="$1"
+  local FIELD="$2"
+  jq -r \
+    --arg name "$NAME" \
+    ".item[] | select(.name == \$name) | $FIELD" \
+    "$COLLECTION_FILE"
+}
+
+#######################################
+# Execute API Call
+#######################################
+run_command() {
+  local NAME="$1"
+  local QUERY="${2:-}"
+  local RAW="${3:-false}"
+
+  TOKEN=$(get_bearer_token)
+
+  METHOD=$(get_request_field "$NAME" '.request.method')
+  PATH=$(get_request_field "$NAME" '.request.url.raw')
+
+  if [[ "$METHOD" == "null" || "$PATH" == "null" ]]; then
+    echo "Command not found: $NAME"
+    exit 1
+  fi
+
+  URL="$BASE_URL$PATH$QUERY"
+
+  if [[ "$RAW" == "true" ]]; then
+    curl -s -X "$METHOD" "$URL" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Accept: application/json"
+  else
+    curl -s -X "$METHOD" "$URL" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Accept: application/json" | jq
+  fi
+}
+
+#######################################
+# CLI Dispatcher
+#######################################
+case "${1:-}" in
+  list)
+    list_commands
+    ;;
+  describe)
+    [[ -z "${2:-}" ]] && echo "Usage: describe <CommandName>" && exit 1
+    describe_command "$2"
+    ;;
+  run)
+    [[ -z "${2:-}" ]] && echo "Usage: run <CommandName> [query] [--raw]" && exit 1
+    RAW=false
+    [[ "${3:-}" == "--raw" || "${4:-}" == "--raw" ]] && RAW=true
+    QUERY=""
+    [[ "${3:-}" != "--raw" ]] && QUERY="${3:-}"
+    run_command "$2" "$QUERY" "$RAW"
+    ;;
+  *)
+    cat <<EOF
+Usage:
+  ./bd-cli.sh list
+  ./bd-cli.sh describe "<CommandName>"
+  ./bd-cli.sh run "<CommandName>" ["?q=filter&limit=10"] [--raw]
+
+Examples:
+  ./bd-cli.sh list
+  ./bd-cli.sh describe "Projects"
+  ./bd-cli.sh run "Projects"
+  ./bd-cli.sh run "Projects" "?q=name:demo&limit=5"
+  ./bd-cli.sh run "Projects" "?limit=1" --raw
+EOF
+    ;;
+esac
