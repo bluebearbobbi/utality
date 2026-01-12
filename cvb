@@ -1,0 +1,24 @@
+REQ_JSON=$(jq -c --arg name "$NAME" '
+  # Look at all items that have a .request field
+  .item[]? | select(.request? and .name == $name)
+' "$COLLECTION_FILE")
+
+
+  
+  
+METHOD=$(echo "$REQ_JSON" | jq -r '.request.method')
+
+URL=$(echo "$REQ_JSON" | jq -r --arg base "$BASE_URL" '
+  if .request.url.raw then
+    (.request.url.raw | sub("\\{\\{baseUrl\\}\\}"; $base))
+  elif .request.url.path then
+    $base + .request.url.path
+  else
+    empty
+  end
+')
+
+# DEBUG before curl
+echo "DEBUG: NAME=$NAME"
+echo "DEBUG: METHOD=$METHOD"
+echo "DEBUG: URL=$URL"
