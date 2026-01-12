@@ -1,0 +1,312 @@
+CLI Utility (curl + jq)
+
+This document describes a command-line utility that allows support engineers to execute Black Duck SCA API calls defined in the official Postman Collection using only curl, jq, and the Postman Collection JSON.
+
+The goal is to:
+	•	Avoid Postman entirely
+	•	Be transparent and debuggable
+	•	Be easy to extend by support engineers
+	•	Match how the Black Duck APIs are actually called
+
+⸻
+
+1. What This Utility Is (and Is Not)
+
+This is:
+	•	A shell-based utility (bash/zsh compatible)
+	•	A thin execution layer over the Postman Collection JSON
+	•	A support-focused testing tool, not a full SDK
+
+This is not:
+	•	A language SDK
+	•	A full API abstraction layer
+	•	A replacement for official documentation
+
+Think of this as a Postman runner for the CLI.
+
+⸻
+
+2. Prerequisites
+
+Required tools:
+
+curl
+jq
+bash (or zsh)
+
+Required files:
+	•	Black Duck SCA Postman Collection JSON
+	•	This utility script
+	•	A config file (described below)
+
+⸻
+
+3. Directory Structure
+
+blackduck-cli/
+├── bd-cli.sh                  # Main utility
+├── bd-config.json             # Server + credentials
+├── postman/
+│   └── blackduck-sca.json     # Official Postman Collection
+└── README.md
+
+
+⸻
+
+4. Configuration File
+
+Create bd-config.json:
+
+{
+  "base_url": "https://blackduck.example.com",
+  "api_token": "YOUR_API_TOKEN",
+  "token_cache_file": ".bd_token.json"
+}
+
+Notes
+	•	api_token is the long-lived Black Duck API token
+	•	A short-lived bearer token is generated automatically
+	•	Bearer token is cached and refreshed when expired
+
+⸻
+
+5. Authentication Flow (Automatic)
+
+Black Duck APIs require a Bearer token, generated from the API token.
+
+Token Generation Endpoint
+
+POST /api/tokens/authenticate
+
+Token Response (example)
+
+{
+  "bearerToken": "eyJhbGciOi...",
+  "expiresInMilliseconds": 900000
+}
+
+The utility:
+	1.	Checks for a cached token
+	2.	Validates expiration
+	3.	Generates a fresh token if needed
+	4.	Injects it into every API call
+
+Support engineers never call this manually.
+
+⸻
+
+6. Core Script: bd-cli.sh
+
+Header and Config Load
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="bd-config.json"
+COLLECTION_FILE="postman/blackduck-sca.json"
+
+BASE_URL=$(jq -r '.base_url' "$CONFIG_FILE")
+API_TOKEN=$(jq -r '.api_token' "$CONFIG_FILE")
+TOKEN_CACHE=$(jq -r '.token_cache_file' "$CONFIG_FILE")
+
+
+⸻
+
+7. Bearer Token Management
+
+get_bearer_token() {
+  if [[ -f "$TOKEN_CACHE" ]]; then
+    EXP=$(jq -r '.expires_at' "$TOKEN_CACHE")
+    NOW=$(date +%s)
+    if (( NOW < EXP )); then
+      jq -r '.token' "$TOKEN_CACHE"
+      return
+    fi
+  fi
+
+  RESPONSE=$(curl -s -X POST \
+    "$BASE_URL/api/tokens/authenticate" \
+    -H "Authorization: token $API_TOKEN")
+
+  TOKEN=$(echo "$RESPONSE" | jq -r '.bearerToken')
+  TTL=$(echo "$RESPONSE" | jq -r '.expiresInMilliseconds')
+
+  EXPIRES_AT=$(( $(date +%s) + TTL / 1000 - 30 ))
+
+  jq -n \
+    --arg token "$TOKEN" \
+    --argjson exp "$EXPIRES_AT" \
+    '{token: $token, expires_at: $exp}' > "$TOKEN_CACHE"
+
+  echo "$TOKEN"
+}
+
+
+⸻
+
+8. Listing Available Commands
+
+Commands are derived directly from the Postman Collection.
+
+list_commands() {
+  jq -r '.item[].name' "$COLLECTION_FILE"
+}
+
+Usage:
+
+./bd-cli.sh list
+
+Example output:
+
+Projects
+Versions
+Components
+Vulnerabilities
+Policies
+
+
+⸻
+
+9. Inspecting an API Call (Very Important for Support)
+
+To understand:
+	•	Required path variables
+	•	Query parameters
+	•	Expected request body
+
+Use:
+
+./bd-cli.sh describe "Projects"
+
+Implementation:
+
+describe_command() {
+  local NAME="$1"
+  jq \
+    --arg name "$NAME" \
+    '.item[] | select(.name == $name)' \
+    "$COLLECTION_FILE"
+}
+
+This prints the raw Postman definition, including:
+	•	Method (GET/POST/etc)
+	•	URL template
+	•	Query params
+	•	Body schema
+
+This is the source of truth for expected inputs.
+
+⸻
+
+10. Executing an API Call
+
+run_command() {
+  local NAME="$1"
+  local URL_OVERRIDE="$2"
+
+  TOKEN=$(get_bearer_token)
+
+  METHOD=$(jq -r --arg name "$NAME" '.item[] | select(.name==$name) | .request.method' "$COLLECTION_FILE")
+  PATH=$(jq -r --arg name "$NAME" '.item[] | select(.name==$name) | .request.url.raw' "$COLLECTION_FILE")
+
+  URL="$BASE_URL${PATH}"
+
+  curl -s -X "$METHOD" "$URL" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" | jq
+}
+
+Example:
+
+./bd-cli.sh run "Projects"
+
+
+⸻
+
+11. Handling Filters and Query Parameters
+
+Most Black Duck APIs support filters, limit, offset, sort.
+
+Where to Find Filters
+	1.	Run describe
+	2.	Inspect:
+
+"query": [
+  { "key": "q", "description": "Filter expression" }
+]
+
+
+
+Example: Passing Filters
+
+./bd-cli.sh run "Projects" "?q=name:my-project&limit=10"
+
+Internally appended to the URL.
+
+⸻
+
+12. Printing Raw vs Pretty Output
+
+Default output is piped to jq.
+
+Raw JSON:
+
+./bd-cli.sh run "Projects" --raw
+
+Filtered output:
+
+./bd-cli.sh run "Projects" | jq '.items[].name'
+
+This encourages jq-first debugging.
+
+⸻
+
+13. Common Support Workflows
+
+Verify Authentication
+
+./bd-cli.sh run "Current User"
+
+List Projects
+
+./bd-cli.sh run "Projects" | jq '.items[].name'
+
+Find a Version
+
+./bd-cli.sh run "Versions" "?q=versionName:1.0"
+
+Inspect a 400 or 500 Error
+
+./bd-cli.sh describe "Create Project"
+
+Compare required body fields vs request sent.
+
+⸻
+
+14. Why This Works Well for Support Engineers
+	•	Uses official Postman Collection as the source of truth
+	•	No hidden SDK behavior
+	•	Easy to modify in real-time
+	•	Works in SSH, containers, and support VMs
+	•	Teaches engineers how the API actually behaves
+
+⸻
+
+15. Next Enhancements (Optional)
+	•	Auto-generate help text per command
+	•	Validate required variables before execution
+	•	Support nested Postman folders
+	•	Export curl commands for ticket attachments
+
+⸻
+
+Summary
+
+This utility provides a clean, support-friendly, CLI-first way to test Black Duck SCA APIs using:
+
+✔ curl
+✔ jq
+✔ Postman Collection JSON
+✔ Automatic bearer token handling
+
+It is intentionally simple, transparent, and aligned with real-world support workflows.
