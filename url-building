@@ -1,0 +1,12 @@
+URL=$(echo "$REQ_JSON" | jq -r --arg base "$BASE_URL" '
+  if .request.url.raw then
+    # raw URL exists, may contain {{baseUrl}}
+    (.request.url.raw | sub("\\{\\{baseUrl\\}\\}"; $base))
+  elif (.request.url.path | type == "array") then
+    # path array exists, join elements
+    $base + "/" + (.request.url.path | join("/"))
+  else
+    # fallback: use raw as string if path is missing
+    $base + .request.url.path
+  end
+')
