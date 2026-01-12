@@ -1,0 +1,3 @@
+echo "DEBUG: NAME=$NAME"
+echo "DEBUG: METHOD=$METHOD"
+echo "DEBUG: URL=$URL"
