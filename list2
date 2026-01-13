@@ -1,0 +1,19 @@
+# List available requests with paths (human-readable folder/request names)
+list_requests() {
+  jq -r '
+    def recurse:
+      if .request then
+        # Leaf: this is a request → output the accumulated path
+        $path
+      else
+        # Folder: output its own name (if any), then recurse into children
+        (.name // empty),
+        (.item // [])[] as $child |
+          recurse | 
+            if . == $path then empty else 
+              ($path + (if $path == "" then "" else "/" end) + (.name // empty))
+            end
+      end;
+    recurse
+  ' --arg path "" "$COLLECTION_FILE"
+}
