@@ -1,0 +1,361 @@
+```bash
+#!/bin/bash
+
+# Black Duck SCA API Utility
+# This script allows support engineers to test Black Duck API calls from the command line using the Postman collection.
+# It uses only curl and jq.
+# Config file: ~/.bd_config.json with {"base_url": "https://your-server.com", "api_token": "your_api_token"}
+# Collection file: postman_collection.json (fetched automatically if not present)
+
+set -e
+
+# Check for jq and curl
+command -v jq >/dev/null 2>&1 || { echo >&2 "jq is required but not installed. Aborting."; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo >&2 "curl is required but not installed. Aborting."; exit 1; }
+
+CONFIG_FILE="$HOME/.bd_config.json"
+COLLECTION_FILE="./postman_collection.json"
+
+# Load config
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "Config file not found. Creating template."
+  cat << EOF > "$CONFIG_FILE"
+{
+  "base_url": "https://your-blackduck-server.com",
+  "api_token": "your_api_token_here"
+}
+EOF
+  echo "Please edit $CONFIG_FILE with your Black Duck server URL and API token."
+  exit 1
+fi
+
+BASE_URL=$(jq -r '.base_url' "$CONFIG_FILE")
+API_TOKEN=$(jq -r '.api_token' "$CONFIG_FILE")
+
+if [ -z "$BASE_URL" ] || [ -z "$API_TOKEN" ]; then
+  echo "Invalid config: base_url or api_token missing."
+  exit 1
+fi
+
+# Fetch collection if not present
+if [ ! -f "$COLLECTION_FILE" ]; then
+  echo "Fetching Postman collection from $BASE_URL/api-doc/postman-collection-public.json"
+  curl -s -f "$BASE_URL/api-doc/postman-collection-public.json" -o "$COLLECTION_FILE" || {
+    echo "Failed to fetch collection. Please download it manually from $BASE_URL/api-doc/postman-collection-public.json and save as $COLLECTION_FILE."
+    exit 1
+  }
+fi
+
+# Function to get fresh bearer token
+get_bearer_token() {
+  curl -s -X POST "$BASE_URL/api/tokens/authenticate" \
+    -H "Authorization: token $API_TOKEN" \
+    -H "Content-Type: application/json" | jq -r '.bearerToken'
+}
+
+# Function to replace Postman variables in a string (converts {{var}} to ${var} then uses envsubst)
+replace_variables() {
+  local input="$1"
+  local temp="${input//\{\{/\$\{}"  # Replace {{ with ${
+  temp="${temp//\}\}/\}}"         # Replace }} with }
+  echo "$temp" | envsubst
+}
+
+# List available requests with paths
+list_requests() {
+  jq -r '
+    def find_requests($path):
+      if .request then $path else empty end,
+      (.item? // empty)[] | find_requests($path + if $path == "" then "" else "/" end + .name);
+    find_requests("")
+  ' "$COLLECTION_FILE"
+}
+
+# Get request JSON by path (e.g., "Folder/Subfolder/Request Name")
+get_request_json() {
+  local req_path="$1"
+  jq --arg p "$req_path" '
+    def find_request($path; $current):
+      if $path == "" then $current.request else
+        ($path | split("/")[0]) as $first |
+        ($path | split("/") | .[1:] | join("/")) as $rest |
+        ($current.item // empty)[] | if .name == $first then find_request($rest; .) else empty end;
+    find_request($p; .)
+  ' "$COLLECTION_FILE"
+}
+
+# Execute a request by path
+exec_request() {
+  local req_path="$1"
+  shift
+  local request_json=$(get_request_json "$req_path")
+
+  if [ "$request_json" = "null" ]; then
+    echo "Request not found: $req_path"
+    exit 1
+  fi
+
+  # Set built-in variables as environment vars
+  export baseUrl="$BASE_URL"
+  export apiToken="$API_TOKEN"
+
+  # Check if bearerToken is needed and get fresh one
+  if echo "$request_json" | grep -q '{{bearerToken}}'; then
+    local bearer=$(get_bearer_token)
+    if [ -z "$bearer" ]; then
+      echo "Failed to obtain bearer token."
+      exit 1
+    fi
+    export bearerToken="$bearer"
+  fi
+
+  # Set user-provided variables (key=value args)
+  while [ $# -gt 0 ]; do
+    if [[ $1 == *"="* ]]; then
+      local key="${1%%=*}"
+      local value="${1#*=}"
+      export "$key"="$value"
+    fi
+    shift
+  done
+
+  # Extract request details
+  local method=$(echo "$request_json" | jq -r '.method')
+  local url=$(echo "$request_json" | jq -r '.url.raw')
+  local body_mode=$(echo "$request_json" | jq -r '.body.mode // ""')
+  local body_raw=$(echo "$request_json" | jq -r '.body.raw // ""')
+
+  # Replace variables in URL
+  local replaced_url=$(replace_variables "$url")
+
+  # Build headers
+  local headers=()
+  echo "$request_json" | jq -c '.header[]?' | while read -r header; do
+    local h_key=$(echo "$header" | jq -r '.key')
+    local h_value=$(echo "$header" | jq -r '.value')
+    local replaced_value=$(replace_variables "$h_value")
+    headers+=("-H" "$h_key: $replaced_value")
+  done
+
+  # Handle body (assuming raw mode for simplicity; extend if needed)
+  local body_opt=""
+  if [ "$body_mode" = "raw" ] && [ -n "$body_raw" ]; then
+    local replaced_body=$(replace_variables "$body_raw")
+    body_opt="-d '$replaced_body'"
+  elif [ -n "$body_mode" ]; then
+    echo "Unsupported body mode: $body_mode"
+    exit 1
+  fi
+
+  # Build and execute curl command
+  local curl_cmd="curl -s -X $method \"${replaced_url}\" ${headers[*]} $body_opt"
+  eval "$curl_cmd" | jq . || echo "Raw response (not JSON): $(eval "$curl_cmd")"
+}
+
+# Main command handler
+case "$1" in
+  list)
+    list_requests
+    ;;
+  exec)
+    shift
+    exec_request "$@"
+    ;;
+  token)
+    get_bearer_token
+    ;;
+  *)
+    echo "Usage:"
+    echo "  $0 list                  # List available request paths"
+    echo "  $0 exec <path> [key=value ...]  # Execute request, provide variables as needed"
+    echo "  $0 token                 # Get fresh bearer token"
+    exit 1
+    ;;
+esac
+```
+
+Here is the updated **wiki-style page** with enhancements for handling editable URL parameters and test calls. I've also noted the fix for the authentication header in the script (changed from "Bearer" to "token" based on official Black Duck documentation).
+
+# Black Duck SCA API CLI Utility (curl + jq)
+
+This lightweight command-line tool lets support engineers quickly test Black Duck Hub SCA API calls using the official Postman collection structure — without needing Postman itself.
+
+It handles:
+- Bearer token generation/refresh (using your long-lived API token)
+- Variable substitution (e.g. `{{baseUrl}}`, `{{bearerToken}}`, custom params like `{{projectId}}`)
+- Listing available requests (using folder/request names as paths)
+- Executing any request from the collection
+
+**Requirements**
+- `curl`
+- `jq` (JSON processor)
+- Bash (works on Linux/macOS; should work on WSL/Git Bash on Windows)
+
+## 1. Setup Instructions
+
+### Step 1: Create the config file
+
+Create (or edit) the file at `~/.bd_config.json`:
+
+```json
+{
+  "base_url": "https://your-blackduck-server.com",
+  "api_token": "your_api_token_here"
+}
+```
+
+- **base_url**: Your Black Duck instance URL (without trailing slash). Ensure this is the exact hostname (e.g., no subdomains if on-prem). If you encounter connection issues, verify by curling `$BASE_URL/api-doc/public.html` manually.
+- **api_token**: Generate this from the Black Duck UI → User menu → **My Access Tokens** → Create new token  
+  (This is the long-lived token — **not** the short-lived bearer token)
+
+**Important**: Keep this file secure — it contains your API credentials. If authentication fails (e.g., 401 errors), double-check the `api_token` and ensure it's a valid, unexpired token.
+
+### Step 2: Download the script
+
+Save the utility script as `bd-cli.sh` (or any name you prefer):
+
+```bash
+# Copy the full updated script content from above here
+# (the one starting with #!/bin/bash, with the fixed Authorization: token header)
+```
+
+Then make it executable:
+
+```bash
+chmod +x bd-cli.sh
+```
+
+(Optionally move it to `/usr/local/bin/` or add its directory to your `$PATH` for global usage.)
+
+### Step 3: First run (auto-downloads collection)
+
+The script automatically downloads the Postman collection JSON on first use:
+
+```
+https://<your-blackduck-server>/api-doc/postman-collection-public.json
+→ saved as ./postman_collection.json
+```
+
+If the download fails (e.g., network/firewall, incorrect `base_url`), manually download it from your server and place it in the same directory as the script. Test the URL in a browser to confirm.
+
+**Update Note**: The script now uses the correct authentication header (`Authorization: token $API_TOKEN`) for fetching bearer tokens, as per Black Duck docs. If you had issues with URL/auth, this should resolve them.
+
+## 2. Usage
+
+```bash
+./bd-cli.sh <command> [arguments]
+```
+
+### Available Commands
+
+- **List all available API requests** (shows folder/request paths, using names from the collection):
+
+  ```bash
+  ./bd-cli.sh list
+  ```
+
+  Example output snippet:
+  ```
+  Projects
+  Projects/List projects
+  Projects/Create project
+  Projects/Get project by ID
+  Vulnerabilities
+  Vulnerabilities/Search vulnerabilities
+  ...
+  ```
+
+  Paths are constructed from folder and request names (e.g., "Projects/Get project by ID").
+
+- **Get a fresh bearer token** (useful for debugging):
+
+  ```bash
+  ./bd-cli.sh token
+  ```
+
+  Output: a long JWT bearer token string
+
+- **Execute an API request** (main feature):
+
+  ```bash
+  ./bd-cli.sh exec "Path/To/Request Name" [var1=value1 var2=value2 ...]
+  ```
+
+  - Path is the full folder + request name as shown in `list` (case-sensitive).
+  - Extra `key=value` pairs become environment variables (replaces `{{key}}` in the request URL, body, or headers). This is crucial for endpoints with editable parameters like IDs or queries.
+
+## 3. Handling Editable Parameters in URLs
+
+Many API endpoints require parameters in the URL (e.g., `{{projectId}}` in the path) or query strings (e.g., `q={{searchQuery}}`). The script automatically replaces these with values you provide as `key=value` arguments.
+
+- Find requests needing params: Use `./bd-cli.sh list` and note paths like "Projects/Get project by ID" (URL likely `{{baseUrl}}/api/projects/{{projectId}}`).
+- Provide values: Pass them after the path, e.g., `projectId=your-uuid-here`.
+- If the request has multiple params, provide all required ones.
+- Built-in vars like `{{baseUrl}}` and `{{bearerToken}}` are handled automatically.
+- For query params not in `{{}}` (hardcoded in collection), they might not need substitution, but you can override if needed.
+
+If a required param is missing, the curl will fail (e.g., invalid URL). Always check the response for errors.
+
+## 4. Test Call Examples
+
+### Basic Test: List Projects (no editable params)
+
+```bash
+# Execute the "List projects" request (under Projects folder)
+./bd-cli.sh exec "Projects/List projects" limit=5
+```
+
+- Here, `limit=5` is an optional query param (if supported by the endpoint).
+- Expected output: JSON with projects list.
+
+### Test with Editable URL Parameters: Get Project by ID
+
+Assume you have a project ID (get it from "List projects" output, e.g., `_meta.href` has `/api/projects/uuid` → use the uuid).
+
+```bash
+./bd-cli.sh exec "Projects/Get project by ID" projectId=your-project-uuid-here
+```
+
+- Replaces `{{projectId}}` in the URL (e.g., becomes `/api/projects/your-project-uuid-here`).
+- Expected output: JSON details for that project.
+
+### Another Test: Search Vulnerabilities (with query params)
+
+```bash
+./bd-cli.sh exec "Vulnerabilities/Search vulnerabilities" q="vulnerability:cve-2023-12345" limit=10
+```
+
+- `q` and `limit` replace `{{q}}` and `{{limit}}` if present in the URL/query.
+- If the collection uses different var names, match them (e.g., `searchQuery=foo` if it's `{{searchQuery}}`).
+
+### Test with Body (e.g., Create Project)
+
+For POST requests with body:
+
+```bash
+./bd-cli.sh exec "Projects/Create project" name="NewTestProject" description="Test desc"
+```
+
+- Assumes the body has `{{name}}` and `{{description}}`; provide as needed.
+- Output: Created project JSON or error.
+
+**Tip**: Pipe output for processing: `./bd-cli.sh exec "Projects/List projects" | jq '.items[].name'`
+
+## 5. Troubleshooting
+
+- **"Request not found"** → Run `./bd-cli.sh list` and copy the exact path (case-sensitive, uses names as paths).
+- **Bearer token errors (401/403)** → Check `api_token` in config; run `./bd-cli.sh token` to test. Ensure `base_url` is correct (no trailing slash, exact hostname).
+- **Connection issues** → Verify `base_url` by curling `$BASE_URL/api/tokens/authenticate` (with auth). Add `--insecure` to curl in script if SSL issues (for testing).
+- **Variable not replaced** → Provide it explicitly: `projectId=abc123`. If `{{var}}` not in collection, the endpoint might not support it.
+- **Collection outdated** → Delete `./postman_collection.json` and re-run — it will re-download.
+- **URL config not working** → Fixed in this update: auth uses "token" not "Bearer". Test base_url manually.
+
+## 6. Tips & Best Practices
+
+- Always use `./bd-cli.sh list` first to discover endpoints and required params.
+- Most useful endpoints: **Projects**, **Versions**, **Vulnerabilities**, **Components**, **Policies**, **Reports**.
+- For paginated responses: Use `limit`, `offset`, `q` (search query).
+- Extend the script for form-data bodies if needed (current handles raw JSON).
+- For production, consider official SDKs (Python, etc.).
+
+Happy API testing! 🚀
