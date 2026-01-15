@@ -1,0 +1,48 @@
+    describe)
+        endpoint="$2"
+        if [ -z "$endpoint" ]; then
+            echo "Usage: bdapi describe <endpoint>"
+            echo "Example: bdapi describe projects/{projectId}/versions/{projectVersionId}/components"
+            exit 1
+        fi
+
+        # Use single quotes around the whole filter + proper escaping inside
+        description=$(jq --arg path "$endpoint" '
+            ($path | split("/") | map(select(. != ""))) as $segments
+
+            | (.item // []) as $items
+
+            | reduce $segments[] as $seg (
+                $items;
+                map(select(.name == $seg)) // []
+              )
+
+            | if length == 0 then
+                "Endpoint not found in collection"
+              else
+                .[0] as $found
+
+                | $found.description // "No folder description"
+
+                | if $found.request then
+                    ($found.request
+                      | "Method: \(.method)\n"
+                      + "URL: \(.url.raw // (.url | join("/")))\n"
+                      + "Body mode: \(.body.mode // "none")\n"
+                      + "Description: \(.description // "No additional description")"
+                    )
+                  else .
+                  end
+              end
+        ' "$COLLECTION_FILE" 2>/dev/null)
+
+        if [ $? -ne 0 ]; then
+            echo "jq parsing failed — possible collection format mismatch or syntax issue"
+            echo "Try running with a simpler endpoint first, e.g.: bdapi describe projects"
+            exit 1
+        fi
+
+        echo "Description for: $endpoint"
+        echo "----------------------------------------"
+        echo "$description"
+        ;;
