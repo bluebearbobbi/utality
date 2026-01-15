@@ -1,0 +1,239 @@
+```bash
+#!/bin/bash
+
+# bdapi - Black Duck API Command Line Utility
+
+CONFIG_FILE="$HOME/.bdapirc"
+COLLECTION_FILE="bd-postman-collection-public.json"
+
+# Load config
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+else
+    echo "Config file $CONFIG_FILE not found. Please create it with BD_URL and BD_API_TOKEN."
+    exit 1
+fi
+
+# Download collection if not present
+if [ ! -f "$COLLECTION_FILE" ]; then
+    curl -s "$BD_URL/api-doc/postman-collection-public.json" -o "$COLLECTION_FILE"
+    if [ $? -ne 0 ]; then
+        echo "Failed to download Postman collection from $BD_URL/api-doc/postman-collection-public.json"
+        exit 1
+    fi
+fi
+
+# Function to get bearer token
+get_bearer() {
+    curl -s -X POST "$BD_URL/api/tokens/authenticate" \
+        -H "Authorization: token $BD_API_TOKEN" \
+        -H "Accept: application/vnd.blackducksoftware.user-1+json" | jq -r '.bearerToken'
+}
+
+bearer=$(get_bearer)
+if [ -z "$bearer" ]; then
+    echo "Failed to obtain bearer token."
+    exit 1
+fi
+
+case "$1" in
+    list)
+        jq -r '
+          def printpaths($curr):
+            if .request then $curr
+            elif .item then .item[] | printpaths($curr + "/" + .name)
+            else empty
+            end;
+          .item[] | printpaths(.name)
+        ' "$COLLECTION_FILE" | sort | uniq
+        ;;
+    describe)
+        endpoint="$2"
+        if [ -z "$endpoint" ]; then
+            echo "Usage: bdapi describe <endpoint>"
+            exit 1
+        fi
+        description=$(jq --arg path "$endpoint" '
+          ($path | split("/")) as $segments |
+          reduce $segments[] as $seg (
+            .item;
+            .[] | select(.name == $seg)
+          ) | .description // (.request | "Method: \(.method)\nURL: \(.url.raw // .url)\nBody Mode: \(.body.mode // \"none\")\nDescription: \(.description // \"No description\")")
+        ' "$COLLECTION_FILE")
+        echo "$description"
+        ;;
+    call)
+        endpoint="$2"
+        shift 2
+        declare -A vars
+        body=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --var)
+                    if [ -z "$2" ]; then echo "Missing value for --var"; exit 1; fi
+                    key="${2%%=*}"
+                    value="${2#*=}"
+                    vars["$key"]="$value"
+                    shift 2
+                    ;;
+                --body)
+                    if [ -z "$2" ]; then echo "Missing value for --body"; exit 1; fi
+                    body="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "Unknown option: $1"
+                    exit 1
+                    ;;
+            esac
+        done
+
+        request_json=$(jq --arg path "$endpoint" '
+          ($path | split("/")) as $segments |
+          reduce $segments[] as $seg (
+            .item;
+            .[] | select(.name == $seg)
+          ) | .request
+        ' "$COLLECTION_FILE")
+
+        if [ "$request_json" = "null" ]; then
+            echo "Endpoint not found: $endpoint"
+            exit 1
+        fi
+
+        method=$(echo "$request_json" | jq -r '.method')
+        url_raw=$(echo "$request_json" | jq -r '.url.raw // (.url | join("/"))' | sed "s/{{baseUrl}}/${BD_URL}/g")
+
+        # Replace path variables
+        path_vars=$(echo "$request_json" | jq -r '.url.variable // [] | .[].key')
+        for key in $path_vars; do
+            value="${vars[$key]}"
+            if [ -z "$value" ]; then
+                echo "Missing required variable: $key"
+                exit 1
+            fi
+            url_raw="${url_raw/:${key}/${value}}"
+        done
+
+        # Body: use provided or from collection
+        if [ -z "$body" ]; then
+            body_mode=$(echo "$request_json" | jq -r '.body.mode // ""')
+            if [ "$body_mode" = "raw" ]; then
+                body=$(echo "$request_json" | jq -r '.body.raw')
+            fi
+        fi
+
+        # Headers from collection
+        headers=$(echo "$request_json" | jq -r '.header // [] | .[] | "-H \"" + .key + ": " + .value + "\""' )
+
+        # Add Authorization
+        headers="$headers -H \"Authorization: Bearer $bearer\""
+
+        # If body, add Content-Type if not present
+        if [ -n "$body" ]; then
+            if ! echo "$headers" | grep -iq "Content-Type"; then
+                headers="$headers -H \"Content-Type: application/json\""
+            fi
+            curl_args="-d '$body'"
+        else
+            curl_args=""
+        fi
+
+        # Execute curl
+        response=$(eval "curl -s -w '\n%{http_code}' -X '$method' '$url_raw' $headers $curl_args")
+        http_code=$(echo "$response" | tail -n 1)
+        body_response=$(echo "$response" | head -n -1 | jq . 2>/dev/null || echo "$response" | head -n -1)
+
+        echo "HTTP Code: $http_code"
+        echo "JSON Body:"
+        echo "$body_response"
+        ;;
+    *)
+        echo "Usage:"
+        echo "  bdapi list"
+        echo "  bdapi describe <endpoint>"
+        echo "  bdapi call <endpoint> [--var <key>=<value>]... [--body '<json>']"
+        exit 1
+        ;;
+esac
+```
+
+Here is the sample config file content (save as `~/.bdapirc`):
+
+```
+BD_URL=https://your-black-duck-server
+BD_API_TOKEN=your_api_token_here
+```
+
+Here is the README.md file:
+
+# bdapi - Black Duck API Command Line Utility
+
+This utility assists support engineers in testing Black Duck SCA APIs using the provided Postman collection. It requires only `jq` and `curl` to be installed.
+
+## Setup
+
+1. Create the config file at `~/.bdapirc` with your Black Duck URL and API token:
+
+   ```
+   BD_URL=https://your-black-duck-server
+   BD_API_TOKEN=your_api_token_here
+   ```
+
+2. Save the script as `bdapi`, make it executable: `chmod +x bdapi`.
+
+3. The script will automatically download the Postman collection to `bd-postman-collection-public.json` if not present, using the BD_URL from config.
+
+## Features
+
+- Automatically fetches bearer token for authentication.
+- Lists available API calls based on the Postman collection endpoints (paths without "/api").
+- Describes an endpoint.
+- Calls an endpoint and prints the full response (HTTP code and JSON body).
+
+## Commands
+
+- `bdapi list`: Lists all available endpoints from the collection.
+- `bdapi describe <endpoint>`: Provides a description of the specified endpoint.
+- `bdapi call <endpoint> [--var <key>=<value>]... [--body '<json>']`: Calls the endpoint. Use `--var` for path variables (e.g., projectId), and `--body` for request bodies if needed.
+
+## Pointers
+
+- Endpoints are listed as paths like `projects`, `projects/{projectId}/versions/{projectVersionId}/components`.
+- For endpoints with path variables (e.g., `{projectId}`), provide them using `--var projectId=<value>`.
+- The bearer token is fetched automatically for each call.
+- If the collection has a default body, it will be used unless overridden with `--body`.
+- Ensure `jq` and `curl` are in your PATH.
+- The utility assumes the Postman collection uses path segments as item names and nests them accordingly.
+
+## Example Commands
+
+1. List all available calls:
+
+   ```
+   ./bdapi list
+   ```
+
+2. Describe an endpoint:
+
+   ```
+   ./bdapi describe projects/{projectId}/versions/{projectVersionId}/components
+   ```
+
+3. Call a simple GET endpoint:
+
+   ```
+   ./bdapi call projects
+   ```
+
+4. Call an endpoint with path variables (e.g., GET /api/projects/{projectId}/versions/{projectVersionId}/components):
+
+   ```
+   ./bdapi call projects/{projectId}/versions/{projectVersionId}/components --var projectId=12345678-1234-1234-1234-123456789012 --var projectVersionId=87654321-4321-4321-4321-210987654321
+   ```
+
+5. Call an endpoint that requires a JSON body (e.g., POST /api/projects to create a project, assuming "projects" supports POST in the collection):
+
+   ```
+   ./bdapi call projects --body '{"name": "MyTestProject", "description": "A test project", "projectLevelAdjustments": false}'
+   ```
