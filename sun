@@ -1,0 +1,515 @@
+bdapi – Black Duck SCA API CLI Utility
+
+bdapi is a lightweight command-line utility designed to help support engineers quickly test and explore Black Duck SCA APIs using the official Postman Collection, without needing Postman itself.
+
+It uses only curl and jq, works cross-platform, and is ideal for debugging, reproducing customer issues, and validating API behavior.
+
+⸻
+
+Features
+	•	Uses the Black Duck public Postman Collection
+	•	Automatically fetches and refreshes Bearer tokens
+	•	Lists available API calls based on endpoint paths
+	•	Describes endpoints (method, path, variables)
+	•	Executes API calls and prints:
+	•	HTTP status code
+	•	Full JSON response body
+	•	Requires only:
+	•	bash
+	•	curl
+	•	jq
+
+⸻
+
+Repository Layout
+
+.
+├── bdapi                     # CLI utility
+├── bdapi.conf                # Configuration file (URL + API token)
+├── bd-postman-collection-public.json
+├── README.md
+
+
+⸻
+
+Requirements
+	•	macOS or Linux
+	•	bash 4+
+	•	curl
+	•	jq
+
+On macOS:
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="bdapi.conf"
+COLLECTION_FILE="bd-postman-collection-public.json"
+
+error() {
+  echo "ERROR: $1" >&2
+  exit 1
+}
+
+[[ -f "$CONFIG_FILE" ]] || error "Missing $CONFIG_FILE"
+[[ -f "$COLLECTION_FILE" ]] || error "Missing $COLLECTION_FILE"
+
+# shellcheck disable=SC1090
+source "$CONFIG_FILE"
+
+[[ -n "${BD_URL:-}" ]] || error "BD_URL not set in config"
+[[ -n "${BD_API_TOKEN:-}" ]] || error "BD_API_TOKEN not set in config"
+
+get_bearer_token() {
+  local resp token code
+  resp=$(curl -s -w "
+%{http_code}" -X POST "$BD_URL/api/tokens/authenticate" \
+    -H "Authorization: token $BD_API_TOKEN")
+
+  token=$(echo "$resp" | head -n -1 | jq -r '.bearerToken // empty')
+  code=$(echo "$resp" | tail -n 1)
+
+  [[ "$code" == "200" ]] || error "Authentication failed (HTTP $code)"
+  [[ -n "$token" ]] || error "Bearer token missing in response"
+
+  echo "$token"
+}
+
+BEARER_TOKEN=$(get_bearer_token)
+
+list_calls() {
+  jq -r '.item[] | .item[] | "\(.request.method)    /\(.name)"' "$COLLECTION_FILE"
+}
+
+describe_call() {
+  local path="$1"
+
+  jq -r --arg path "$path" '
+    .item[] | .item[] | select(.name == $path) |
+    "Method: \(.request.method)
+Path:   /api/\(.name)
+Variables:" +
+    (if (.request.url.variable | length) > 0 then
+       "
+" + (.request.url.variable[] | "  - " + .key)
+     else
+       " none"
+     end)
+  ' "$COLLECTION_FILE" || error "Endpoint not found: $path"
+}
+
+apply_vars() {
+  local url="$1"; shift
+  for pair in "$@"; do
+    key="${pair%%=*}"; val="${pair#*=}"
+    url="${url//\{$key\}/$val}"
+  done
+  echo "$url" | grep -q '{' && error "Missing required path variables"
+  echo "$url"
+}
+
+call_api() {
+  local path="$1"; shift
+  local data_file="" vars=() limit="" offset=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --var) vars+=("$2"); shift 2 ;; 
+      --data) data_file="$2"; shift 2 ;; 
+      --limit) limit="$2"; shift 2 ;; 
+      --offset) offset="$2"; shift 2 ;; 
+      *) shift ;; 
+    esac
+  done
+
+  req=$(jq -c --arg path "$path" '.item[] | .item[] | select(.name == $path)' "$COLLECTION_FILE")
+  [[ -n "$req" ]] || error "Endpoint not found in collection"
+
+  method=$(echo "$req" | jq -r '.request.method')
+  url="$BD_URL/api/$path"
+  url=$(apply_vars "$url" "${vars[@]}")
+
+  query=""
+  [[ -n "$limit" ]] && query="limit=$limit"
+  [[ -n "$offset" ]] && query="${query:+$query&}offset=$offset"
+  [[ -n "$query" ]] && url="$url?$query"
+
+  if [[ -n "$data_file" ]]; then
+    [[ -f "$data_file" ]] || error "Data file not found"
+    resp=$(curl -s -w "
+%{http_code}" -X "$method" "$url" \
+      -H "Authorization: Bearer $BEARER_TOKEN" \
+      -H "Content-Type: application/json" \
+      --data "@$data_file")
+  else
+    resp=$(curl -s -w "
+%{http_code}" -X "$method" "$url" \
+      -H "Authorization: Bearer $BEARER_TOKEN")
+  fi
+
+  body=$(echo "$resp" | head -n -1)
+  code=$(echo "$resp" | tail -n 1)
+
+  case "$code" in
+    200|201)
+      echo "HTTP $code"
+      echo "$body" | jq
+      ;;
+    401) error "Unauthorized (401): Invalid or expired token" ;; 
+    403) error "Forbidden (403): Insufficient permissions" ;; 
+    *)
+      echo "HTTP $code"
+      echo "$body" | jq -r '.' 2>/dev/null || echo "$body"
+      exit 1
+      ;;
+  esac
+
+  next=$(echo "$body" | jq -r '.meta.links.next.href // empty')
+  [[ -n "$next" ]] && echo -e "
+Next page available:
+$next"
+}
+
+case "${1:-}" in
+  list) list_calls ;; 
+  describe) describe_call "$2" ;; 
+  call) shift; call_api "$@" ;; 
+  *) echo "Usage: bdapi {list|describe|call}" >&2; exit 1 ;; 
+esac
+
+
+⸻
+
+Getting Started (macOS Example)
+
+1. Clone from GitLab
+
+git clone https://gitlab.com/<your-org>/bdapi.git
+cd bdapi
+
+2. Make the script executable
+
+chmod +x bdapi
+
+(Optional) Add to your PATH:
+
+sudo ln -s $(pwd)/bdapi /usr/local/bin/bdapi
+
+
+⸻
+
+Configuration
+
+Create or edit bdapi.conf:
+
+BD_URL="https://your-blackduck-server"
+BD_API_TOKEN="YOUR_API_TOKEN"
+
+Notes:
+	•	Do not include /api in the URL
+	•	The API token is the long-lived token generated in Black Duck
+
+⸻
+
+Postman Collection
+
+The utility expects the collection file to be named:
+
+bd-postman-collection-public.json
+
+Important behavior:
+	•	The name field of each request is the API path
+	•	Paths do not include /api
+
+Example:
+
+projects/{projectId}/versions
+
+
+⸻
+
+Usage
+
+List available API calls
+
+bdapi list
+
+Output:
+
+GET    /projects
+GET    /projects/{projectId}
+GET    /projects/{projectId}/versions
+POST   /projects/{projectId}/versions/{projectVersionId}/components
+
+
+⸻
+
+Describe an endpoint
+
+bdapi describe "/projects/{projectId}/versions"
+
+Output:
+
+Method: GET
+Path:   /api/projects/{projectId}/versions
+Variables:
+  - projectId
+
+
+⸻
+
+Call a simple endpoint
+
+bdapi call "/projects"
+
+Output:
+
+HTTP 200
+{
+  "items": [...]
+}
+
+
+⸻
+
+Call an endpoint with path variables
+
+bdapi call "/projects/{projectId}/versions" \
+  --var projectId=12345678-aaaa-bbbb-cccc-1234567890ab
+
+
+⸻
+
+Call an endpoint requiring JSON body and path variables
+
+Example:
+
+POST /api/projects/{projectId}/versions/{projectVersionId}/components
+
+Create component.json:
+
+{
+  "componentName": "openssl",
+  "componentVersionName": "3.0.13"
+}
+
+Run:
+
+bdapi call "/projects/{projectId}/versions/{projectVersionId}/components" \
+  --var projectId=1234 \
+  --var projectVersionId=5678 \
+  --data component.json
+
+
+⸻
+
+The bdapi Script
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="bdapi.conf"
+COLLECTION_FILE="bd-postman-collection-public.json"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Missing $CONFIG_FILE" >&2
+  exit 1
+fi
+
+source "$CONFIG_FILE"
+
+if [[ -z "${BD_URL:-}" || -z "${BD_API_TOKEN:-}" ]]; then
+  echo "BD_URL and BD_API_TOKEN must be set" >&2
+  exit 1
+fi
+
+get_bearer_token() {
+  curl -s -X POST "$BD_URL/api/tokens/authenticate" \
+    -H "Authorization: token $BD_API_TOKEN" | jq -r '.bearerToken'
+}
+
+BEARER_TOKEN=$(get_bearer_token)
+
+list_calls() {
+  jq -r '.item[] | .item[] | "\(.request.method)    /\(.name)"' "$COLLECTION_FILE"
+}
+
+describe_call() {
+  local path="$1"
+
+  jq -r --arg path "$path" '
+    .item[] | .item[] | select(.name == $path) |
+    "Method: \(.request.method)\nPath:   /api/\(.name)\nVariables:\n" +
+    ( [ .request.url.variable[]?.key ] | map("  - " + .) | join("\n") )
+  ' "$COLLECTION_FILE"
+}
+
+call_api() {
+  local path="$1"
+  shift
+
+  local data_file=""
+  declare -A vars
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --var)
+        key="${2%%=*}"
+        val="${2#*=}"
+        vars[$key]="$val"
+        shift 2
+        ;;
+      --data)
+        data_file="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  local req
+  req=$(jq -c --arg path "$path" '.item[] | .item[] | select(.name == $path)' "$COLLECTION_FILE")
+
+  local method
+  method=$(echo "$req" | jq -r '.request.method')
+
+  local url="$BD_URL/api/$path"
+
+  for k in "${!vars[@]}"; do
+    url="${url//\{$k\}/${vars[$k]}}"
+  done
+
+  if [[ -n "$data_file" ]]; then
+    response=$(curl -s -w "\nHTTP %{http_code}" -X "$method" "$url" \
+      -H "Authorization: Bearer $BEARER_TOKEN" \
+      -H "Content-Type: application/json" \
+      --data "@$data_file")
+  else
+    response=$(curl -s -w "\nHTTP %{http_code}" -X "$method" "$url" \
+      -H "Authorization: Bearer $BEARER_TOKEN")
+  fi
+
+  echo "$response"
+}
+
+case "${1:-}" in
+  list)
+    list_calls
+    ;;
+  describe)
+    describe_call "$2"
+    ;;
+  call)
+    shift
+    call_api "$@"
+    ;;
+  *)
+    echo "Usage: bdapi {list|describe|call}" >&2
+    exit 1
+    ;;
+esac
+
+
+⸻
+
+Bash Completion for Endpoint Paths
+
+To make bdapi faster and safer for support engineers, you can enable Bash tab-completion for endpoint paths directly from the Postman collection.
+
+1. Completion Script (bdapi-completion.bash)
+
+Create a new file named bdapi-completion.bash in the repo:
+
+# Bash completion for bdapi
+
+_bdapi_complete() {
+  local cur prev cmds endpoints
+
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  cmds="list describe call"
+
+  # Complete subcommands
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+    return 0
+  fi
+
+  # Complete endpoint paths for describe/call
+  if [[ "$prev" == "describe" || "$prev" == "call" ]]; then
+    if [[ -f "bd-postman-collection-public.json" ]]; then
+      endpoints=$(jq -r '.item[] | .item[] | .name' bd-postman-collection-public.json)
+      COMPREPLY=( $(compgen -W "$endpoints" -- "$cur") )
+    fi
+    return 0
+  fi
+
+  # Complete flags for call
+  if [[ "${COMP_WORDS[1]}" == "call" ]]; then
+    COMPREPLY=( $(compgen -W "--var --data --limit --offset" -- "$cur") )
+    return 0
+  fi
+}
+
+complete -F _bdapi_complete bdapi
+
+
+⸻
+
+2. Enable Completion (macOS / Bash)
+
+From the repo root:
+
+source bdapi-completion.bash
+
+Or install permanently:
+
+sudo cp bdapi-completion.bash /usr/local/etc/bash_completion.d/bdapi
+
+Restart your shell or run:
+
+source /usr/local/etc/bash_completion
+
+
+⸻
+
+3. Example Usage
+
+bdapi call <TAB>
+
+Will expand to:
+
+/projects
+/projects/{projectId}
+/projects/{projectId}/versions
+/projects/{projectId}/versions/{projectVersionId}/components
+
+This works because the completion script reads directly from the Postman collection, ensuring it always stays in sync with supported APIs.
+
+⸻
+
+Notes for Support Engineers
+	•	This utility mirrors real customer API usage
+	•	Ideal for:
+	•	Reproducing API issues
+	•	Verifying permissions
+	•	Testing Postman collection accuracy
+	•	No SDKs, no Java, no Python
+
+⸻
+
+Next Enhancements (Optional)
+	•	Token caching with expiration handling
+	•	Autocomplete for endpoints
+	•	Paging helpers
+	•	Output filtering (--jq)
+
+⸻
+
+If you want, I can also:
+	•	Split this into real files for copy/paste
+	•	Add paging helpers for large endpoints
+	•	Add a minimal test harness
