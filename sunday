@@ -83,29 +83,69 @@ get_bearer_token() {
 
 BEARER_TOKEN=$(get_bearer_token)
 
-list_calls() {
-  # Safely traverse Postman collection folders + requests
+# --- Shared Postman URL parsing ---
+
+extract_path() {
   jq -r '
-    .. | objects | select(has("request") and has("name")) |
-    "\(.request.method)    /\(.name)"
-  ' "$COLLECTION_FILE" || error "Failed to parse Postman collection"
+    if .request.url.path? then
+      "/" + (.request.url.path | join("/"))
+    else
+      .request.url.raw
+    end
+  '
+}
+
+find_request_by_path() {
+  local path="$1"
+  jq -c --arg path "$path" '
+    .. | objects
+    | select(.request? and .request.url?)
+    | select(
+        (
+          if .request.url.path? then
+            "/" + (.request.url.path | join("/"))
+          else
+            .request.url.raw
+          end
+        ) == $path
+      )
+  ' "$COLLECTION_FILE"
+}
+
+# --- Commands ---
+
+list_calls() {
+  jq -r '
+    .. | objects
+    | select(.request? and .request.method? and .request.url?)
+    | (
+        if .request.url.path? then
+          "/" + (.request.url.path | join("/"))
+        else
+          .request.url.raw
+        end
+      ) as $path
+    | "\(.request.method)    \($path)"
+  ' "$COLLECTION_FILE" | sort -u
 }
 
 describe_call() {
   local path="$1"
+  req=$(find_request_by_path "$path")
+  [[ -n "$req" ]] || error "Endpoint not found: $path"
 
-  jq -r --arg path "$path" '
-    .item[] | .item[] | select(.name == $path) |
-    "Method: \(.request.method)
-Path:   /api/\(.name)
-Variables:" +
-    (if (.request.url.variable | length) > 0 then
-       "
-" + (.request.url.variable[] | "  - " + .key)
-     else
-       " none"
-     end)
-  ' "$COLLECTION_FILE" || error "Endpoint not found: $path"
+  method=$(echo "$req" | jq -r '.request.method')
+  vars=$(echo "$req" | jq -r '.request.url.variable[]?.key')
+
+  echo "Method: $method"
+  echo "Path:   $path"
+  echo "Variables:"
+
+  if [[ -n "$vars" ]]; then
+    echo "$vars" | sed 's/^/  - /'
+  else
+    echo "  none"
+  fi
 }
 
 apply_vars() {
@@ -132,11 +172,12 @@ call_api() {
     esac
   done
 
-  req=$(jq -c --arg path "$path" '.item[] | .item[] | select(.name == $path)' "$COLLECTION_FILE")
-  [[ -n "$req" ]] || error "Endpoint not found in collection"
+  req=$(find_request_by_path "$path")
+  [[ -n "$req" ]] || error "Endpoint not found: $path"
 
   method=$(echo "$req" | jq -r '.request.method')
-  url="$BD_URL/api/$path"
+
+  url="$BD_URL$path"
   url=$(apply_vars "$url" "${vars[@]}")
 
   query=""
