@@ -1,45 +1,51 @@
-bdapi – Black Duck SCA API CLI Utility
+# bdapi – Black Duck SCA API CLI Utility
 
-bdapi is a lightweight command-line utility designed to help support engineers quickly test and explore Black Duck SCA APIs using the official Postman Collection, without needing Postman itself.
+`bdapi` is a lightweight command-line utility designed to help **support engineers** quickly test and explore **Black Duck SCA APIs** using the official **Postman Collection**, without needing Postman itself.
 
-It uses only curl and jq, works cross-platform, and is ideal for debugging, reproducing customer issues, and validating API behavior.
+It uses **only `curl` and `jq`**, works cross-platform, and is ideal for debugging, reproducing customer issues, and validating API behavior.
 
-⸻
+---
 
-Features
-	•	Uses the Black Duck public Postman Collection
-	•	Automatically fetches and refreshes Bearer tokens
-	•	Lists available API calls based on endpoint paths
-	•	Describes endpoints (method, path, variables)
-	•	Executes API calls and prints:
-	•	HTTP status code
-	•	Full JSON response body
-	•	Requires only:
-	•	bash
-	•	curl
-	•	jq
+## Features
 
-⸻
+* Uses the **Black Duck public Postman Collection**
+* Automatically **fetches and refreshes Bearer tokens**
+* Lists available API calls based on **endpoint paths**
+* Describes endpoints (method, path, variables)
+* Executes API calls and prints:
 
-Repository Layout
+  * HTTP status code
+  * Full JSON response body
+* Requires only:
 
+  * `bash`
+  * `curl`
+  * `jq`
+
+---
+
+## Repository Layout
+
+```
 .
 ├── bdapi                     # CLI utility
 ├── bdapi.conf                # Configuration file (URL + API token)
 ├── bd-postman-collection-public.json
 ├── README.md
+```
 
+---
 
-⸻
+## Requirements
 
-Requirements
-	•	macOS or Linux
-	•	bash 4+
-	•	curl
-	•	jq
+* macOS or Linux
+* `bash` 4+
+* `curl`
+* `jq`
 
 On macOS:
 
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -180,135 +186,163 @@ case "${1:-}" in
   call) shift; call_api "$@" ;; 
   *) echo "Usage: bdapi {list|describe|call}" >&2; exit 1 ;; 
 esac
+```
 
+---
 
-⸻
+## Getting Started (macOS Example)
 
-Getting Started (macOS Example)
+### 1. Clone from GitLab
 
-1. Clone from GitLab
-
+```bash
 git clone https://gitlab.com/<your-org>/bdapi.git
 cd bdapi
+```
 
-2. Make the script executable
+### 2. Make the script executable
 
+```bash
 chmod +x bdapi
+```
 
 (Optional) Add to your PATH:
 
+```bash
 sudo ln -s $(pwd)/bdapi /usr/local/bin/bdapi
+```
 
+---
 
-⸻
+## Configuration
 
-Configuration
+Create or edit `bdapi.conf`:
 
-Create or edit bdapi.conf:
-
+```bash
 BD_URL="https://your-blackduck-server"
 BD_API_TOKEN="YOUR_API_TOKEN"
+```
 
 Notes:
-	•	Do not include /api in the URL
-	•	The API token is the long-lived token generated in Black Duck
 
-⸻
+* Do **not** include `/api` in the URL
+* The API token is the **long-lived token** generated in Black Duck
 
-Postman Collection
+---
+
+## Postman Collection
 
 The utility expects the collection file to be named:
 
+```
 bd-postman-collection-public.json
+```
 
 Important behavior:
-	•	The name field of each request is the API path
-	•	Paths do not include /api
+
+* The `name` field of each request **is the API path**
+* Paths **do not include `/api`**
 
 Example:
 
+```
 projects/{projectId}/versions
+```
 
+---
 
-⸻
+## Usage
 
-Usage
+### List available API calls
 
-List available API calls
-
+```bash
 bdapi list
+```
 
 Output:
 
+```
 GET    /projects
 GET    /projects/{projectId}
 GET    /projects/{projectId}/versions
 POST   /projects/{projectId}/versions/{projectVersionId}/components
+```
 
+---
 
-⸻
+### Describe an endpoint
 
-Describe an endpoint
-
+```bash
 bdapi describe "/projects/{projectId}/versions"
+```
 
 Output:
 
+```
 Method: GET
 Path:   /api/projects/{projectId}/versions
 Variables:
   - projectId
+```
 
+---
 
-⸻
+### Call a simple endpoint
 
-Call a simple endpoint
-
+```bash
 bdapi call "/projects"
+```
 
 Output:
 
+```
 HTTP 200
 {
   "items": [...]
 }
+```
 
+---
 
-⸻
+### Call an endpoint with path variables
 
-Call an endpoint with path variables
-
+```bash
 bdapi call "/projects/{projectId}/versions" \
   --var projectId=12345678-aaaa-bbbb-cccc-1234567890ab
+```
 
+---
 
-⸻
-
-Call an endpoint requiring JSON body and path variables
+### Call an endpoint requiring JSON body and path variables
 
 Example:
 
+```
 POST /api/projects/{projectId}/versions/{projectVersionId}/components
+```
 
-Create component.json:
+Create `component.json`:
 
+```json
 {
   "componentName": "openssl",
   "componentVersionName": "3.0.13"
 }
+```
 
 Run:
 
+```bash
 bdapi call "/projects/{projectId}/versions/{projectVersionId}/components" \
   --var projectId=1234 \
   --var projectVersionId=5678 \
   --data component.json
+```
 
+---
 
-⸻
+## The bdapi Script
 
-The bdapi Script
-
+```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -414,18 +448,19 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+```
 
+---
 
-⸻
+## Bash Completion for Endpoint Paths
 
-Bash Completion for Endpoint Paths
+To make `bdapi` faster and safer for support engineers, you can enable **Bash tab-completion** for endpoint paths directly from the Postman collection.
 
-To make bdapi faster and safer for support engineers, you can enable Bash tab-completion for endpoint paths directly from the Postman collection.
+### 1. Completion Script (`bdapi-completion.bash`)
 
-1. Completion Script (bdapi-completion.bash)
+Create a new file named `bdapi-completion.bash` in the repo:
 
-Create a new file named bdapi-completion.bash in the repo:
-
+```bash
 # Bash completion for bdapi
 
 _bdapi_complete() {
@@ -459,61 +494,74 @@ _bdapi_complete() {
 }
 
 complete -F _bdapi_complete bdapi
+```
 
+---
 
-⸻
-
-2. Enable Completion (macOS / Bash)
+### 2. Enable Completion (macOS / Bash)
 
 From the repo root:
 
+```bash
 source bdapi-completion.bash
+```
 
 Or install permanently:
 
+```bash
 sudo cp bdapi-completion.bash /usr/local/etc/bash_completion.d/bdapi
+```
 
 Restart your shell or run:
 
+```bash
 source /usr/local/etc/bash_completion
+```
 
+---
 
-⸻
+### 3. Example Usage
 
-3. Example Usage
-
+```bash
 bdapi call <TAB>
+```
 
 Will expand to:
 
+```
 /projects
 /projects/{projectId}
 /projects/{projectId}/versions
 /projects/{projectId}/versions/{projectVersionId}/components
+```
 
-This works because the completion script reads directly from the Postman collection, ensuring it always stays in sync with supported APIs.
+This works because the completion script reads **directly from the Postman collection**, ensuring it always stays in sync with supported APIs.
 
-⸻
+---
 
-Notes for Support Engineers
-	•	This utility mirrors real customer API usage
-	•	Ideal for:
-	•	Reproducing API issues
-	•	Verifying permissions
-	•	Testing Postman collection accuracy
-	•	No SDKs, no Java, no Python
+## Notes for Support Engineers
 
-⸻
+* This utility mirrors **real customer API usage**
+* Ideal for:
 
-Next Enhancements (Optional)
-	•	Token caching with expiration handling
-	•	Autocomplete for endpoints
-	•	Paging helpers
-	•	Output filtering (--jq)
+  * Reproducing API issues
+  * Verifying permissions
+  * Testing Postman collection accuracy
+* No SDKs, no Java, no Python
 
-⸻
+---
+
+## Next Enhancements (Optional)
+
+* Token caching with expiration handling
+* Autocomplete for endpoints
+* Paging helpers
+* Output filtering (`--jq`)
+
+---
 
 If you want, I can also:
-	•	Split this into real files for copy/paste
-	•	Add paging helpers for large endpoints
-	•	Add a minimal test harness
+
+* Split this into real files for copy/paste
+* Add paging helpers for large endpoints
+* Add a minimal test harness
