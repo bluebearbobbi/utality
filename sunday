@@ -67,9 +67,23 @@ source "$CONFIG_FILE"
 [[ -n "${BD_API_TOKEN:-}" ]] || error "BD_API_TOKEN not set in config"
 
 get_bearer_token() {
-  local resp token code
+  local resp body code token
+
   resp=$(curl -k -s -w "
 %{http_code}" -X POST "$BD_URL/api/tokens/authenticate" \
+    -H "Authorization: token $BD_API_TOKEN")
+
+  # BSD/macOS-compatible split of body + status code
+  body=$(printf "%s" "$resp" | sed '$d')
+  code=$(printf "%s" "$resp" | tail -n 1)
+
+  [[ "$code" == "200" ]] || error "Authentication failed (HTTP $code)"
+
+  token=$(printf "%s" "$body" | jq -r '.bearerToken // empty')
+  [[ -n "$token" ]] || error "Bearer token missing in response"
+
+  echo "$token"
+}" -X POST "$BD_URL/api/tokens/authenticate" \
     -H "Authorization: token $BD_API_TOKEN")
 
   token=$(echo "$resp" | head -n -1 | jq -r '.bearerToken // empty')
